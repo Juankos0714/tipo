@@ -1,9 +1,7 @@
-// ===== CONFIGURACION =====
-const FILA_ENCABEZADO = 1;   // Fila donde estan los titulos
-const TOLERANCIA = 1;        // Diferencia permitida en pesos (redondeos)
-const EJEMPLOS_POR_REGLA = 5; // Ejemplos que se imprimen en el registro
+const FILA_ENCABEZADO = 1;
+const TOLERANCIA = 1;
+const EJEMPLOS_POR_REGLA = 5;
 
-// Titulos de las columnas (no importan mayusculas, tildes ni puntos)
 const COLS: { [clave: string]: string } = {
   facturaNota: "Fact./Nota",
   estado: "Estado",
@@ -25,7 +23,6 @@ const COLS: { [clave: string]: string } = {
   facturaElectronica: "Factura electrónica"
 };
 
-// Reglas y su severidad
 const R_RAZON = "Razón social vacía";
 const R_ELECTRONICA = "Factura electrónica no confirmada";
 const R_ESTADO = "Estado distinto de Aprobadas";
@@ -75,7 +72,6 @@ function normalizar(texto: string): string {
     .trim();
 }
 
-// Convierte una celda a numero (acepta "$55.100,00" si llegara como texto)
 function numero(v: Celda): number {
   if (typeof v === "number") return v;
   const t = String(v).replace(/[$\s]/g, "").replace(/\./g, "").replace(",", ".");
@@ -94,7 +90,6 @@ function main(workbook: ExcelScript.Workbook) {
   const totalCols = usado.getColumnIndex() + usado.getColumnCount();
   const datos = hoja.getRangeByIndexes(0, 0, totalFilas, totalCols).getValues();
 
-  // ---------- Ubicar columnas ----------
   const idxEnc = FILA_ENCABEZADO - 1;
   const titulos = datos[idxEnc].map((v) => normalizar(String(v)));
   const c: { [clave: string]: number } = {};
@@ -127,14 +122,12 @@ function main(workbook: ExcelScript.Workbook) {
     return;
   }
 
-  // ---------- Fact./Nota repetidas ----------
   const conteoFactura: { [clave: string]: number } = {};
   for (let i = 0; i < n; i++) {
     const f = String(datos[idxEnc + 1 + i][c.facturaNota]).trim();
     if (f !== "") conteoFactura[f] = (conteoFactura[f] || 0) + 1;
   }
 
-  // ---------- Evaluar cada fila ----------
   const hallazgos: Hallazgo[] = [];
   const salidaSev: string[][] = [];
   const salidaObs: string[][] = [];
@@ -144,9 +137,9 @@ function main(workbook: ExcelScript.Workbook) {
   const porVendedor: { [nombre: string]: ConteoPersona } = {};
 
   for (let i = 0; i < n; i++) {
-    const indice = idxEnc + 1 + i;           // indice 0-based en la hoja
+    const indice = idxEnc + 1 + i;
     const fila = datos[indice];
-    const filaExcel = indice + 1;            // numero de fila tal como se ve en Excel
+    const filaExcel = indice + 1;
 
     const factura = String(fila[c.facturaNota]).trim();
     const razon = String(fila[c.razon]).trim();
@@ -204,7 +197,6 @@ function main(workbook: ExcelScript.Workbook) {
       agregar(R_REPETIDA, "Aparece " + conteoFactura[factura] + " veces", 1, conteoFactura[factura]);
     }
 
-    // Severidad global de la fila
     let sev = "OK";
     for (const r of reglasFila) {
       if (SEVERIDAD_REGLA[r] === "ERROR") { sev = "ERROR"; break; }
@@ -215,7 +207,6 @@ function main(workbook: ExcelScript.Workbook) {
     if (sev === "ERROR") filasError.push(indice);
     if (sev === "SOSPECHOSO") filasSosp.push(indice);
 
-    // Conteos por cajero y vendedor
     if (!porCajero[cajero]) porCajero[cajero] = { total: 0, conError: 0 };
     if (!porVendedor[vendedor]) porVendedor[vendedor] = { total: 0, conError: 0 };
     porCajero[cajero].total++;
@@ -226,7 +217,6 @@ function main(workbook: ExcelScript.Workbook) {
     }
   }
 
-  // ---------- Escribir en la hoja original ----------
   const rangoSev = hoja.getRangeByIndexes(idxEnc + 1, cSev, n, 1);
   const rangoObs = hoja.getRangeByIndexes(idxEnc + 1, cObs, n, 1);
   rangoSev.getFormat().getFill().clear();
@@ -237,13 +227,11 @@ function main(workbook: ExcelScript.Workbook) {
   for (const f of filasSosp) hoja.getRangeByIndexes(f, cSev, 1, 2).getFormat().getFill().setColor("#FFEB9C");
   hoja.getRange("P:P").getFormat().autofitColumns();
 
-  // ---------- Conteo por regla ----------
   const reglas = Object.keys(SEVERIDAD_REGLA);
   const porRegla: { [regla: string]: Hallazgo[] } = {};
   for (const r of reglas) porRegla[r] = [];
   for (const h of hallazgos) porRegla[h.regla].push(h);
 
-  // ---------- Hoja "Detalle validacion" ----------
   const nombreDetalle = "Detalle validacion";
   const detalleVieja = workbook.getWorksheet(nombreDetalle);
   if (detalleVieja) detalleVieja.delete();
@@ -263,7 +251,6 @@ function main(workbook: ExcelScript.Workbook) {
   hojaDetalle.getFreezePanes().freezeRows(1);
   hojaDetalle.getUsedRange().getFormat().autofitColumns();
 
-  // ---------- Hoja "Resumen validacion" ----------
   const nombreResumen = "Resumen validacion";
   const resumenViejo = workbook.getWorksheet(nombreResumen);
   if (resumenViejo) resumenViejo.delete();
@@ -309,7 +296,6 @@ function main(workbook: ExcelScript.Workbook) {
   hojaResumen.getUsedRange().getFormat().autofitColumns();
   hojaResumen.activate();
 
-  // ---------- Registro de salida ----------
   console.log("Filas revisadas: " + n + " | Errores: " + filasError.length + " | Sospechosos: " + filasSosp.length);
   console.log("Total de hallazgos: " + hallazgos.length);
   console.log("---- Por regla ----");
