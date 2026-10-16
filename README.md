@@ -1,6 +1,7 @@
 // ===== CONFIGURACION =====
 const FILA_ENCABEZADO = 1;   // Fila donde estan los titulos
 const TOLERANCIA = 1;        // Diferencia permitida en pesos (redondeos)
+const EJEMPLOS_POR_REGLA = 5; // Ejemplos que se imprimen en el registro
 
 // Titulos de las columnas (no importan mayusculas, tildes ni puntos)
 const COLS: { [clave: string]: string } = {
@@ -12,8 +13,10 @@ const COLS: { [clave: string]: string } = {
   subtotal: "Valor subtotal",
   impuestos: "Valor impuestos",
   neto: "Valor neto",
+  vendedor: "Nombre vendedor",
   credito: "Valor crédito",
   contado: "Valor contado",
+  cajero: "Nombre cajero",
   efectivo: "Efectivo",
   cheque: "Cheque",
   tarjetaCredito: "Tarjeta crédito",
@@ -22,7 +25,45 @@ const COLS: { [clave: string]: string } = {
   facturaElectronica: "Factura electrónica"
 };
 
+// Reglas y su severidad
+const R_RAZON = "Razón social vacía";
+const R_ELECTRONICA = "Factura electrónica no confirmada";
+const R_ESTADO = "Estado distinto de Aprobadas";
+const R_SUBTOTAL = "Bruto - descuentos distinto de subtotal";
+const R_NETO = "Subtotal + impuestos distinto de valor neto";
+const R_CREDCONT = "Contado + crédito distinto de valor neto";
+const R_PAGOS = "Formas de pago distintas del valor contado";
+const R_REPETIDA = "Fact./Nota repetida";
+
+const SEVERIDAD_REGLA: { [regla: string]: string } = {};
+SEVERIDAD_REGLA[R_RAZON] = "ERROR";
+SEVERIDAD_REGLA[R_ELECTRONICA] = "ERROR";
+SEVERIDAD_REGLA[R_ESTADO] = "SOSPECHOSO";
+SEVERIDAD_REGLA[R_SUBTOTAL] = "ERROR";
+SEVERIDAD_REGLA[R_NETO] = "ERROR";
+SEVERIDAD_REGLA[R_CREDCONT] = "ERROR";
+SEVERIDAD_REGLA[R_PAGOS] = "ERROR";
+SEVERIDAD_REGLA[R_REPETIDA] = "ERROR";
+
 type Celda = string | number | boolean;
+
+interface Hallazgo {
+  severidad: string;
+  fila: number;
+  factura: string;
+  razon: string;
+  cajero: string;
+  vendedor: string;
+  regla: string;
+  detalle: string;
+  esperado: number | string;
+  encontrado: number | string;
+}
+
+interface ConteoPersona {
+  total: number;
+  conError: number;
+}
 
 function normalizar(texto: string): string {
   return texto
@@ -53,7 +94,7 @@ function main(workbook: ExcelScript.Workbook) {
   const totalCols = usado.getColumnIndex() + usado.getColumnCount();
   const datos = hoja.getRangeByIndexes(0, 0, totalFilas, totalCols).getValues();
 
-  // Ubicar columnas por titulo
+  // ---------- Ubicar columnas ----------
   const idxEnc = FILA_ENCABEZADO - 1;
   const titulos = datos[idxEnc].map((v) => normalizar(String(v)));
   const c: { [clave: string]: number } = {};
@@ -68,7 +109,6 @@ function main(workbook: ExcelScript.Workbook) {
     return;
   }
 
-  // Ubicar o crear las columnas de resultado
   let siguiente = totalCols;
   let cSev = titulos.indexOf("SEVERIDAD");
   if (cSev < 0) {
@@ -87,26 +127,31 @@ function main(workbook: ExcelScript.Workbook) {
     return;
   }
 
-  // Contar Fact./Nota para detectar repetidas
-  const conteo: { [clave: string]: number } = {};
+  // ---------- Fact./Nota repetidas ----------
+  const conteoFactura: { [clave: string]: number } = {};
   for (let i = 0; i < n; i++) {
     const f = String(datos[idxEnc + 1 + i][c.facturaNota]).trim();
-    if (f !== "") conteo[f] = (conteo[f] || 0) + 1;
+    if (f !== "") conteoFactura[f] = (conteoFactura[f] || 0) + 1;
   }
 
-  // Evaluar cada fila
+  // ---------- Evaluar cada fila ----------
+  const hallazgos: Hallazgo[] = [];
   const salidaSev: string[][] = [];
   const salidaObs: string[][] = [];
   const filasError: number[] = [];
   const filasSosp: number[] = [];
+  const porCajero: { [nombre: string]: ConteoPersona } = {};
+  const porVendedor: { [nombre: string]: ConteoPersona } = {};
 
   for (let i = 0; i < n; i++) {
-    const fila = datos[idxEnc + 1 + i];
-    const errores: string[] = [];
-    const sospechas: string[] = [];
+    const indice = idxEnc + 1 + i;           // indice 0-based en la hoja
+    const fila = datos[indice];
+    const filaExcel = indice + 1;            // numero de fila tal como se ve en Excel
 
     const factura = String(fila[c.facturaNota]).trim();
     const razon = String(fila[c.razon]).trim();
+    const cajero = String(fila[c.cajero]).trim() || "(sin cajero)";
+    const vendedor = String(fila[c.vendedor]).trim() || "(sin vendedor)";
     const estado = normalizar(String(fila[c.estado]));
     const electronica = String(fila[c.facturaElectronica]).trim();
 
@@ -117,46 +162,163 @@ function main(workbook: ExcelScript.Workbook) {
     const neto = numero(fila[c.neto]);
     const credito = numero(fila[c.credito]);
     const contado = numero(fila[c.contado]);
-    const pagos = numero(fila[c.efectivo]) + numero(fila[c.cheque]) +
-      numero(fila[c.tarjetaCredito]) + numero(fila[c.tarjetaDebito]) + numero(fila[c.otros]);
+    const efectivo = numero(fila[c.efectivo]);
+    const cheque = numero(fila[c.cheque]);
+    const tCredito = numero(fila[c.tarjetaCredito]);
+    const tDebito = numero(fila[c.tarjetaDebito]);
+    const otros = numero(fila[c.otros]);
+    const pagos = efectivo + cheque + tCredito + tDebito + otros;
 
-    if (razon === "") errores.push("Razon social del cliente vacia");
+    const reglasFila: string[] = [];
+    const agregar = (regla: string, detalle: string, esperado: number | string, encontrado: number | string) => {
+      reglasFila.push(regla);
+      hallazgos.push({
+        severidad: SEVERIDAD_REGLA[regla], fila: filaExcel, factura: factura, razon: razon,
+        cajero: cajero, vendedor: vendedor, regla: regla, detalle: detalle,
+        esperado: esperado, encontrado: encontrado
+      });
+    };
+
+    if (razon === "") agregar(R_RAZON, "La columna de razón social está vacía", "", "");
     if (normalizar(electronica) !== "CONFIRMADOS") {
-      errores.push("Factura electronica no confirmada (" + (electronica || "vacio") + ")");
+      agregar(R_ELECTRONICA, "Valor en Factura electrónica: " + (electronica || "(vacío)"), "Confirmados", electronica || "(vacío)");
     }
-    if (estado !== "APROBADAS") sospechas.push("Estado distinto de Aprobadas (" + String(fila[c.estado]) + ")");
-    if (distintos(bruto - descuentos, subtotal)) errores.push("Bruto - descuentos no coincide con subtotal");
-    if (distintos(subtotal + impuestos, neto)) errores.push("Subtotal + impuestos no coincide con valor neto");
-    if (distintos(contado + credito, neto)) errores.push("Contado + credito no coincide con valor neto");
-    if (distintos(pagos, contado)) errores.push("Formas de pago (" + pagos + ") no suman el valor contado (" + contado + ")");
-    if (factura !== "" && conteo[factura] > 1) errores.push("Fact./Nota repetida");
+    if (estado !== "APROBADAS") {
+      agregar(R_ESTADO, "Valor en Estado: " + String(fila[c.estado]), "Aprobadas", String(fila[c.estado]));
+    }
+    if (distintos(bruto - descuentos, subtotal)) {
+      agregar(R_SUBTOTAL, "Bruto " + bruto + " - descuentos " + descuentos, bruto - descuentos, subtotal);
+    }
+    if (distintos(subtotal + impuestos, neto)) {
+      agregar(R_NETO, "Subtotal " + subtotal + " + impuestos " + impuestos, subtotal + impuestos, neto);
+    }
+    if (distintos(contado + credito, neto)) {
+      agregar(R_CREDCONT, "Contado " + contado + " + crédito " + credito, contado + credito, neto);
+    }
+    if (distintos(pagos, contado)) {
+      agregar(R_PAGOS,
+        "Efectivo " + efectivo + " | Cheque " + cheque + " | T.crédito " + tCredito +
+        " | T.débito " + tDebito + " | Otros " + otros, contado, pagos);
+    }
+    if (factura !== "" && conteoFactura[factura] > 1) {
+      agregar(R_REPETIDA, "Aparece " + conteoFactura[factura] + " veces", 1, conteoFactura[factura]);
+    }
 
-    const todas = errores.concat(sospechas);
-    const sev = errores.length > 0 ? "ERROR" : sospechas.length > 0 ? "SOSPECHOSO" : "OK";
+    // Severidad global de la fila
+    let sev = "OK";
+    for (const r of reglasFila) {
+      if (SEVERIDAD_REGLA[r] === "ERROR") { sev = "ERROR"; break; }
+      sev = "SOSPECHOSO";
+    }
     salidaSev.push([sev]);
-    salidaObs.push([todas.length > 0 ? todas.join("; ") : "OK"]);
-    if (sev === "ERROR") filasError.push(idxEnc + 1 + i);
-    if (sev === "SOSPECHOSO") filasSosp.push(idxEnc + 1 + i);
+    salidaObs.push([reglasFila.length > 0 ? reglasFila.join("; ") : "OK"]);
+    if (sev === "ERROR") filasError.push(indice);
+    if (sev === "SOSPECHOSO") filasSosp.push(indice);
+
+    // Conteos por cajero y vendedor
+    if (!porCajero[cajero]) porCajero[cajero] = { total: 0, conError: 0 };
+    if (!porVendedor[vendedor]) porVendedor[vendedor] = { total: 0, conError: 0 };
+    porCajero[cajero].total++;
+    porVendedor[vendedor].total++;
+    if (sev !== "OK") {
+      porCajero[cajero].conError++;
+      porVendedor[vendedor].conError++;
+    }
   }
 
-  // Escribir resultados de una sola vez
+  // ---------- Escribir en la hoja original ----------
   const rangoSev = hoja.getRangeByIndexes(idxEnc + 1, cSev, n, 1);
   const rangoObs = hoja.getRangeByIndexes(idxEnc + 1, cObs, n, 1);
   rangoSev.getFormat().getFill().clear();
   rangoObs.getFormat().getFill().clear();
   rangoSev.setValues(salidaSev);
   rangoObs.setValues(salidaObs);
-
-  // Colorear: rojo = error, amarillo = sospechoso
-  for (const f of filasError) {
-    hoja.getRangeByIndexes(f, cSev, 1, 2).getFormat().getFill().setColor("#FFC7CE");
-  }
-  for (const f of filasSosp) {
-    hoja.getRangeByIndexes(f, cSev, 1, 2).getFormat().getFill().setColor("#FFEB9C");
-  }
-
-  // Ensanchar columnas (soluciona los ##### en Efectivo si lo ejecutas con la hoja activa)
+  for (const f of filasError) hoja.getRangeByIndexes(f, cSev, 1, 2).getFormat().getFill().setColor("#FFC7CE");
+  for (const f of filasSosp) hoja.getRangeByIndexes(f, cSev, 1, 2).getFormat().getFill().setColor("#FFEB9C");
   hoja.getRange("P:P").getFormat().autofitColumns();
 
+  // ---------- Conteo por regla ----------
+  const reglas = Object.keys(SEVERIDAD_REGLA);
+  const porRegla: { [regla: string]: Hallazgo[] } = {};
+  for (const r of reglas) porRegla[r] = [];
+  for (const h of hallazgos) porRegla[h.regla].push(h);
+
+  // ---------- Hoja "Detalle validacion" ----------
+  const nombreDetalle = "Detalle validacion";
+  const detalleVieja = workbook.getWorksheet(nombreDetalle);
+  if (detalleVieja) detalleVieja.delete();
+  const hojaDetalle = workbook.addWorksheet(nombreDetalle);
+  const encDetalle = ["Severidad", "Fila Excel", "Fact./Nota", "Razón social", "Cajero", "Vendedor",
+    "Regla", "Detalle", "Esperado", "Encontrado", "Diferencia"];
+  hojaDetalle.getRangeByIndexes(0, 0, 1, encDetalle.length).setValues([encDetalle]);
+  hojaDetalle.getRangeByIndexes(0, 0, 1, encDetalle.length).getFormat().getFont().setBold(true);
+  if (hallazgos.length > 0) {
+    const filasDetalle: (string | number)[][] = hallazgos.map((h) => [
+      h.severidad, h.fila, h.factura, h.razon, h.cajero, h.vendedor, h.regla, h.detalle,
+      h.esperado, h.encontrado,
+      (typeof h.esperado === "number" && typeof h.encontrado === "number") ? h.encontrado - h.esperado : ""
+    ]);
+    hojaDetalle.getRangeByIndexes(1, 0, filasDetalle.length, encDetalle.length).setValues(filasDetalle);
+  }
+  hojaDetalle.getFreezePanes().freezeRows(1);
+  hojaDetalle.getUsedRange().getFormat().autofitColumns();
+
+  // ---------- Hoja "Resumen validacion" ----------
+  const nombreResumen = "Resumen validacion";
+  const resumenViejo = workbook.getWorksheet(nombreResumen);
+  if (resumenViejo) resumenViejo.delete();
+  const hojaResumen = workbook.addWorksheet(nombreResumen);
+
+  const filasResumen: (string | number)[][] = [];
+  const filasNegrita: number[] = [];
+  const nuevaFila = (a: string | number, b: string | number, c2: string | number, d: string | number) => {
+    filasResumen.push([a, b, c2, d]);
+  };
+
+  filasNegrita.push(filasResumen.length);
+  nuevaFila("RESUMEN DE VALIDACIÓN", "", "", "");
+  nuevaFila("Filas revisadas", n, "", "");
+  nuevaFila("Filas con ERROR", filasError.length, (filasError.length * 100 / n).toFixed(1) + "%", "");
+  nuevaFila("Filas SOSPECHOSAS", filasSosp.length, (filasSosp.length * 100 / n).toFixed(1) + "%", "");
+  nuevaFila("Filas OK", n - filasError.length - filasSosp.length, "", "");
+  nuevaFila("", "", "", "");
+
+  filasNegrita.push(filasResumen.length);
+  nuevaFila("Regla", "Severidad", "Cantidad", "% de filas");
+  for (const r of reglas) {
+    const cant = porRegla[r].length;
+    nuevaFila(r, SEVERIDAD_REGLA[r], cant, (cant * 100 / n).toFixed(1) + "%");
+  }
+  nuevaFila("", "", "", "");
+
+  const agregarPersonas = (titulo: string, mapa: { [nombre: string]: ConteoPersona }) => {
+    filasNegrita.push(filasResumen.length);
+    nuevaFila(titulo, "Facturas", "Con hallazgos", "% con hallazgos");
+    const lista = Object.keys(mapa).sort((a, b) => mapa[b].conError - mapa[a].conError);
+    for (const nombre of lista) {
+      const p = mapa[nombre];
+      nuevaFila(nombre, p.total, p.conError, (p.conError * 100 / p.total).toFixed(1) + "%");
+    }
+    nuevaFila("", "", "", "");
+  };
+  agregarPersonas("Por cajero", porCajero);
+  agregarPersonas("Por vendedor", porVendedor);
+
+  hojaResumen.getRangeByIndexes(0, 0, filasResumen.length, 4).setValues(filasResumen);
+  for (const f of filasNegrita) hojaResumen.getRangeByIndexes(f, 0, 1, 4).getFormat().getFont().setBold(true);
+  hojaResumen.getUsedRange().getFormat().autofitColumns();
+  hojaResumen.activate();
+
+  // ---------- Registro de salida ----------
   console.log("Filas revisadas: " + n + " | Errores: " + filasError.length + " | Sospechosos: " + filasSosp.length);
+  console.log("Total de hallazgos: " + hallazgos.length);
+  console.log("---- Por regla ----");
+  for (const r of reglas) {
+    const lista = porRegla[r];
+    console.log(r + " [" + SEVERIDAD_REGLA[r] + "]: " + lista.length);
+    for (let k = 0; k < Math.min(EJEMPLOS_POR_REGLA, lista.length); k++) {
+      const h = lista[k];
+      console.log("   fila " + h.fila + " | " + h.factura + " | esperado " + h.esperado + " | encontrado " + h.encontrado + " | " + h.detalle);
+    }
+  }
 }
